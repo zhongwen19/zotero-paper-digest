@@ -1,0 +1,30 @@
+zotero:
+  library_type: user
+  library_id: ""
+  collection_keys: []
+  max_seeds: 30
+
+discovery:
+  recent_days: 90
+  max_candidates_per_source: 50
+  sources: [openalex, crossref]
+
+ranking:
+  shortlist_size: 25
+  llm_enabled: true
+  llm_max_items: 25
+  prefer_new: true
+  min_new_results_before_classics: 3
+
+classics:
+  min_age_years: 5
+
+email:
+  from_email: ""
+  to_email: ""
+  smtp_host: ""
+  smtp_port: 587
+
+output:
+  save_json: true
+  save_html: true

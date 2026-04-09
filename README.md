@@ -13,7 +13,7 @@ It does not write to Zotero. You decide manually whether to import recommended p
 - Deduplicates by DOI, normalized title, and external IDs.
 - Scores candidates locally before any LLM call.
 - Optionally sends one batched DeepSeek rerank call for only the shortlist. The default model is `deepseek-reasoner`.
-- Sends an HTML and plain-text email digest.
+- Sends an HTML and plain-text email digest with journal IF tags, classic-paper citation counts, and one-sentence summaries.
 - Saves generated digest files and logs as GitHub Actions artifacts.
 - Keeps a small GitHub Actions cached recommendation history so the same paper is not recommended again.
 
@@ -175,6 +175,7 @@ Set environment variables first, or copy `.env.example` into your shell environm
 ## Limitations
 
 - OpenAlex `from_publication_date` approximates recent publication date. It is not the same as "newly indexed today."
+- Journal IF in the email comes from OpenAlex source `summary_stats.2yr_mean_citedness`, which OpenAlex documents as a source-level impact-factor style metric.
 - Crossref abstracts are often missing, so OpenAlex usually gives better ranking signals.
 - No full text is fetched.
 - No embeddings are used in the MVP.

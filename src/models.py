@@ -8,6 +8,7 @@ from typing import Any
 class Paper:
     title: str
     abstract: str = ""
+    summary: str = ""
     doi: str = ""
     year: int | None = None
     venue: str = ""
@@ -25,6 +26,7 @@ class Paper:
     score: float = 0.0
     category: str = "NEW"
     why_recommended: str = ""
+    journal_impact_factor: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

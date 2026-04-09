@@ -145,6 +145,52 @@ class OpenAlexClient:
             LOGGER.debug("OpenAlex work lookup failed for %s: %s", work_id, exc)
             return None
 
+    def _get_source_by_id(self, source_id: str) -> dict[str, Any] | None:
+        if not source_id:
+            return None
+        url = openalex_source_api_url(source_id)
+        params = {"mailto": self.mailto} if self.mailto else {}
+
+        def request() -> requests.Response:
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            return response
+
+        try:
+            return with_retries(request, logger=LOGGER).json()
+        except requests.RequestException as exc:
+            LOGGER.debug("OpenAlex source lookup failed for %s: %s", source_id, exc)
+            return None
+
+    def enrich_papers(self, papers: list[Paper]) -> None:
+        source_cache: dict[str, dict[str, Any] | None] = {}
+        for paper in papers:
+            work = self._lookup_work_for_paper(paper)
+            if not work:
+                continue
+            merge_work_metadata(paper, work)
+            source = ((work.get("primary_location") or {}).get("source") or {})
+            source_id = source.get("id", "")
+            if not source_id:
+                continue
+            if source_id not in source_cache:
+                source_cache[source_id] = self._get_source_by_id(source_id)
+            impact_factor = source_impact_factor(source_cache[source_id] or {})
+            if impact_factor is not None:
+                paper.journal_impact_factor = impact_factor
+
+    def _lookup_work_for_paper(self, paper: Paper) -> dict[str, Any] | None:
+        if paper.openalex_id:
+            return self._get_work_by_id(paper.openalex_id)
+        openalex_external_id = paper.external_ids.get("openalex", "")
+        if openalex_external_id:
+            return self._get_work_by_id(openalex_external_id)
+        if paper.source == "openalex" and paper.source_id:
+            return self._get_work_by_id(paper.source_id)
+        if paper.doi:
+            return self._get_work_by_doi(paper.doi)
+        return None
+
     @staticmethod
     def _seed_queries(seeds: list[Paper]) -> list[str]:
         queries: list[str] = []
@@ -192,6 +238,34 @@ def work_to_paper(work: dict[str, Any]) -> Paper | None:
     )
 
 
+def merge_work_metadata(paper: Paper, work: dict[str, Any]) -> None:
+    paper.openalex_id = clean_text(work.get("id") or paper.openalex_id)
+    ids = work.get("ids") or {}
+    if ids:
+        paper.external_ids.update({key: str(value) for key, value in ids.items() if value})
+    cited_by_count = work.get("cited_by_count")
+    if cited_by_count is not None:
+        paper.cited_by_count = int(cited_by_count)
+    primary_location = work.get("primary_location") or {}
+    source = primary_location.get("source") or {}
+    if source.get("display_name"):
+        paper.venue = clean_text(source["display_name"])
+    landing_page_url = primary_location.get("landing_page_url")
+    if landing_page_url and not paper.url:
+        paper.url = clean_text(landing_page_url)
+
+
+def source_impact_factor(source: dict[str, Any]) -> float | None:
+    summary_stats = source.get("summary_stats") or {}
+    value = summary_stats.get("2yr_mean_citedness")
+    if value is None:
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
 def abstract_from_inverted_index(index: dict[str, list[int]]) -> str:
     if not index:
         return ""
@@ -213,3 +287,13 @@ def openalex_api_url(work_id: str) -> str:
     if work_id.startswith("W"):
         return f"https://api.openalex.org/works/{work_id}"
     return work_id
+
+
+def openalex_source_api_url(source_id: str) -> str:
+    if source_id.startswith("https://api.openalex.org/sources/"):
+        return source_id
+    if source_id.startswith("https://openalex.org/"):
+        return source_id.replace("https://openalex.org/", "https://api.openalex.org/sources/")
+    if source_id.startswith("S"):
+        return f"https://api.openalex.org/sources/{source_id}"
+    return source_id

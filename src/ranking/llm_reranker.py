@@ -49,6 +49,7 @@ def rerank_with_deepseek(
                 continue
             llm_score = float(update.get("relevance_score", paper.score))
             paper.score = round((paper.score + llm_score) / 2, 3)
+            paper.summary = str(update.get("summary", paper.summary)).strip() or paper.summary
             paper.why_recommended = str(update.get("reason", paper.why_recommended)).strip() or paper.why_recommended
             category = str(update.get("category", paper.category)).upper()
             if category in {"NEW", "CLASSIC"}:
@@ -90,9 +91,11 @@ def build_prompt(papers: list[Paper], seed_summary: str, required_domain_terms: 
         f"{domain_instruction}"
         f"Seed summary: {seed_summary[:1200]}\n"
         "For each item, return index, relevance_score from 0 to 10, novelty_score from 0 to 10, "
-        "category NEW or CLASSIC, and a short reason under 35 words.\n"
+        "category NEW or CLASSIC, a short reason under 35 words, and a one-sentence summary under 30 words. "
+        "The summary must describe the paper's task, method, and main outcome when the abstract states them. "
+        "Write the summary in English and do not mention the seed library or why it was recommended.\n"
         f"Items: {json.dumps(compact_items, ensure_ascii=True)}\n"
-        'JSON schema: {"items":[{"index":0,"relevance_score":8.1,"novelty_score":7.0,"category":"NEW","reason":"..."}]}'
+        'JSON schema: {"items":[{"index":0,"relevance_score":8.1,"novelty_score":7.0,"category":"NEW","reason":"...","summary":"..."}]}'
     )
 
 

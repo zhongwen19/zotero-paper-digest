@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from typing import Any
 
@@ -105,6 +106,9 @@ def build_digest(config: AppConfig, zotero_api_key: str, recommendation_history:
         ][:needed]
         classic_papers.extend(extra_classics)
 
+    enrich_selected_papers(new_papers + classic_papers, mailto=config.email.to_email or config.email.from_email)
+    ensure_paper_summaries(new_papers + classic_papers)
+
     stats: dict[str, Any] = {
         "seed_count": len(seeds),
         "recent_candidate_count": len(recent_candidates),
@@ -164,3 +168,38 @@ def summarize_seeds(seeds: list[Paper]) -> str:
     venue_text = ", ".join(venue for venue, _ in venues.most_common(8))
     author_text = ", ".join(author for author, _ in authors.most_common(8))
     return f"Top keywords: {keyword_text}. Frequent venues: {venue_text}. Frequent authors: {author_text}."
+
+
+def enrich_selected_papers(papers: list[Paper], *, mailto: str) -> None:
+    if not papers:
+        return
+    unique_papers: list[Paper] = []
+    seen_keys: set[str] = set()
+    for paper in papers:
+        key = paper.openalex_id or paper.doi or paper.title.casefold()
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        unique_papers.append(paper)
+    OpenAlexClient(mailto=mailto).enrich_papers(unique_papers)
+
+
+def ensure_paper_summaries(papers: list[Paper]) -> None:
+    for paper in papers:
+        if paper.summary:
+            continue
+        paper.summary = fallback_summary(paper)
+
+
+def fallback_summary(paper: Paper) -> str:
+    abstract = re.sub(r"\s+", " ", paper.abstract).strip()
+    if abstract:
+        sentences = re.split(r"(?<=[.!?])\s+", abstract)
+        for sentence in sentences:
+            cleaned = sentence.strip()
+            if len(cleaned) >= 50:
+                return cleaned[:197].rstrip(". ") + "."
+    venue = paper.venue.strip()
+    year = str(paper.year) if paper.year else "Unknown year"
+    venue_text = f" in {venue}" if venue else ""
+    return f"This paper presents {paper.title}{venue_text} ({year})."

@@ -27,17 +27,19 @@ def render_text_section(title: str, papers: list[Paper]) -> str:
         return "\n".join(lines)
     for index, paper in enumerate(papers, 1):
         abstract = clean_abstract(paper.abstract)
+        summary = clean_text(paper.summary)
         doi = display_doi(paper)
         url = display_url(paper)
         lines.extend(
             [
                 f"{index}. {clean_text(paper.title)}",
-                f"   Category: {paper.category}",
+                f"   Tags: {render_text_tags(paper)}",
                 f"   Year: {paper.year or 'Unknown'}",
                 f"   Venue: {clean_text(paper.venue) or 'Unknown'}",
                 f"   DOI: {doi or 'N/A'}",
                 f"   URL: {url or 'N/A'}",
                 f"   Abstract: {snippet(abstract, 700) or 'N/A'}",
+                f"   Summary: {snippet(summary, 220) or 'N/A'}",
                 f"   Why: {clean_text(paper.why_recommended) or 'Relevant to the seed collection.'}",
                 "",
             ]
@@ -54,7 +56,10 @@ def render_html_digest(digest: Digest) -> str:
     body {{ font-family: Georgia, 'Times New Roman', serif; color: #1f2933; line-height: 1.55; }}
     .paper {{ border-bottom: 1px solid #d9e2ec; padding: 14px 0; }}
     .meta {{ color: #52606d; font-size: 14px; }}
-    .category {{ display: inline-block; padding: 2px 8px; border-radius: 999px; background: #e0f2fe; color: #075985; font-size: 12px; }}
+    .tag {{ display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; margin-right: 6px; }}
+    .tag-category {{ background: #e0f2fe; color: #075985; }}
+    .tag-if {{ background: #dcfce7; color: #166534; }}
+    .tag-cited {{ background: #fef3c7; color: #92400e; }}
   </style>
 </head>
 <body>
@@ -73,16 +78,18 @@ def render_html_section(title: str, papers: list[Paper]) -> str:
         title_html = html.escape(clean_text(paper.title))
         url = html.escape(display_url(paper))
         doi = display_doi(paper)
+        summary = clean_text(paper.summary)
         title_line = f'<a href="{url}">{title_html}</a>' if url else title_html
         abstract = clean_abstract(paper.abstract)
         items.append(
             f"""<article class="paper">
   <h3>{title_line}</h3>
-  <p><span class="category">{html.escape(paper.category)}</span></p>
+  <p>{render_html_tags(paper)}</p>
   <p class="meta">{html.escape(str(paper.year or "Unknown"))} - {html.escape(clean_text(paper.venue) or "Unknown venue")}</p>
   <p><strong>DOI:</strong> {html.escape(doi or "N/A")}</p>
   <p><strong>URL:</strong> {f'<a href="{url}">{url}</a>' if url else "N/A"}</p>
   <p><strong>Abstract:</strong> {html.escape(snippet(abstract, 900) or "N/A")}</p>
+  <p><strong>Summary:</strong> {html.escape(snippet(summary, 220) or "N/A")}</p>
   <p><strong>Why recommended:</strong> {html.escape(clean_text(paper.why_recommended) or "Relevant to the seed collection.")}</p>
 </article>"""
         )
@@ -125,3 +132,39 @@ def display_doi(paper: Paper) -> str:
 
 def display_url(paper: Paper) -> str:
     return clean_text(paper.url)
+
+
+def render_text_tags(paper: Paper) -> str:
+    tags = [paper.category]
+    impact_factor = display_impact_factor(paper)
+    if impact_factor:
+        tags.append(f"IF:{impact_factor}")
+    times_cited = display_times_cited(paper)
+    if times_cited:
+        tags.append(f"Times Cited:{times_cited}")
+    return " | ".join(tags)
+
+
+def render_html_tags(paper: Paper) -> str:
+    tags = [f'<span class="tag tag-category">{html.escape(paper.category)}</span>']
+    impact_factor = display_impact_factor(paper)
+    if impact_factor:
+        tags.append(f'<span class="tag tag-if">IF: {html.escape(impact_factor)}</span>')
+    times_cited = display_times_cited(paper)
+    if times_cited:
+        tags.append(f'<span class="tag tag-cited">Times Cited: {html.escape(times_cited)}</span>')
+    return "".join(tags)
+
+
+def display_impact_factor(paper: Paper) -> str:
+    value = paper.journal_impact_factor
+    if value is None:
+        return ""
+    formatted = f"{value:.2f}"
+    return formatted.rstrip("0").rstrip(".")
+
+
+def display_times_cited(paper: Paper) -> str:
+    if paper.category != "CLASSIC" or paper.cited_by_count <= 0:
+        return ""
+    return str(paper.cited_by_count)

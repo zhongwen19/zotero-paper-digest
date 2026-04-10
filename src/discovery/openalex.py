@@ -162,20 +162,77 @@ class OpenAlexClient:
             LOGGER.debug("OpenAlex source lookup failed for %s: %s", source_id, exc)
             return None
 
+    def _search_sources(self, venue: str) -> list[dict[str, Any]]:
+        clean_venue = clean_text(venue)
+        if not clean_venue:
+            return []
+        params: dict[str, Any] = {
+            "search": clean_venue,
+            "per-page": 5,
+            "select": "id,display_name,summary_stats",
+        }
+        if self.mailto:
+            params["mailto"] = self.mailto
+
+        def request() -> requests.Response:
+            response = self.session.get("https://api.openalex.org/sources", params=params, timeout=30)
+            response.raise_for_status()
+            return response
+
+        try:
+            return with_retries(request, logger=LOGGER).json().get("results", [])
+        except requests.RequestException as exc:
+            LOGGER.debug("OpenAlex source search failed for %s: %s", venue, exc)
+            return []
+
+    def _get_source_by_venue(self, venue: str) -> dict[str, Any] | None:
+        matches = self._search_sources(venue)
+        if not matches:
+            return None
+        target = normalize_title_key(venue)
+        for match in matches:
+            if normalize_title_key(match.get("display_name", "")) == target:
+                return match
+        return matches[0]
+
+    def _search_work_by_title(self, title: str) -> dict[str, Any] | None:
+        clean_title = clean_text(title)
+        if not clean_title:
+            return None
+        params: dict[str, Any] = {
+            "search": clean_title,
+            "per-page": 5,
+            "select": "id,doi,title,display_name,publication_year,publication_date,authorships,primary_location,abstract_inverted_index,concepts,cited_by_count,ids,related_works,referenced_works",
+        }
+        if self.mailto:
+            params["mailto"] = self.mailto
+        works = self._get_works(params)
+        target = normalize_title_key(clean_title)
+        for work in works:
+            work_title = work.get("title") or work.get("display_name") or ""
+            if normalize_title_key(work_title) == target:
+                return work
+        return None
+
     def enrich_papers(self, papers: list[Paper]) -> None:
         source_cache: dict[str, dict[str, Any] | None] = {}
         for paper in papers:
             work = self._lookup_work_for_paper(paper)
-            if not work:
-                continue
-            merge_work_metadata(paper, work)
-            source = ((work.get("primary_location") or {}).get("source") or {})
-            source_id = source.get("id", "")
-            if not source_id:
-                continue
-            if source_id not in source_cache:
-                source_cache[source_id] = self._get_source_by_id(source_id)
-            impact_factor = source_impact_factor(source_cache[source_id] or {})
+            source_payload: dict[str, Any] | None = None
+            if work:
+                merge_work_metadata(paper, work)
+                source = ((work.get("primary_location") or {}).get("source") or {})
+                source_id = source.get("id", "")
+                if source_id:
+                    if source_id not in source_cache:
+                        source_cache[source_id] = self._get_source_by_id(source_id)
+                    source_payload = source_cache[source_id]
+            if source_payload is None and paper.venue:
+                venue_key = f"venue:{normalize_title_key(paper.venue)}"
+                if venue_key not in source_cache:
+                    source_cache[venue_key] = self._get_source_by_venue(paper.venue)
+                source_payload = source_cache[venue_key]
+            impact_factor = source_impact_factor(source_payload or {})
             if impact_factor is not None:
                 paper.journal_impact_factor = impact_factor
 
@@ -188,8 +245,10 @@ class OpenAlexClient:
         if paper.source == "openalex" and paper.source_id:
             return self._get_work_by_id(paper.source_id)
         if paper.doi:
-            return self._get_work_by_doi(paper.doi)
-        return None
+            work = self._get_work_by_doi(paper.doi)
+            if work:
+                return work
+        return self._search_work_by_title(paper.title)
 
     @staticmethod
     def _seed_queries(seeds: list[Paper]) -> list[str]:
@@ -243,6 +302,8 @@ def merge_work_metadata(paper: Paper, work: dict[str, Any]) -> None:
     ids = work.get("ids") or {}
     if ids:
         paper.external_ids.update({key: str(value) for key, value in ids.items() if value})
+    if not paper.abstract:
+        paper.abstract = clean_abstract(abstract_from_inverted_index(work.get("abstract_inverted_index") or {}))
     cited_by_count = work.get("cited_by_count")
     if cited_by_count is not None:
         paper.cited_by_count = int(cited_by_count)
@@ -297,3 +358,7 @@ def openalex_source_api_url(source_id: str) -> str:
     if source_id.startswith("S"):
         return f"https://api.openalex.org/sources/{source_id}"
     return source_id
+
+
+def normalize_title_key(value: object) -> str:
+    return clean_text(value).casefold()

@@ -153,7 +153,7 @@ def render_html_tags(paper: Paper) -> str:
     times_cited = display_times_cited(paper)
     if times_cited:
         tags.append(f'<span class="tag tag-cited">Times Cited: {html.escape(times_cited)}</span>')
-    return "".join(tags)
+    return " ".join(tags)
 
 
 def display_impact_factor(paper: Paper) -> str:

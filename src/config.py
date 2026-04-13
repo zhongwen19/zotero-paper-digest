@@ -19,6 +19,7 @@ class ZoteroConfig:
 @dataclass
 class DiscoveryConfig:
     recent_days: int
+    recent_backfill_years: list[int]
     max_candidates_per_source: int
     sources: list[str]
 
@@ -71,6 +72,18 @@ def _split_env_list(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _split_env_int_list(value: str | None) -> list[int]:
+    if not value:
+        return []
+    values: list[int] = []
+    for item in value.split(","):
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        values.append(int(cleaned))
+    return values
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -102,6 +115,8 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         discovery=DiscoveryConfig(
             recent_days=int(os.getenv("RECENT_DAYS", discovery.get("recent_days", 90))),
+            recent_backfill_years=_split_env_int_list(os.getenv("RECENT_BACKFILL_YEARS"))
+            or [int(value) for value in discovery.get("recent_backfill_years", [2, 3])],
             max_candidates_per_source=int(
                 os.getenv("MAX_CANDIDATES_PER_SOURCE", discovery.get("max_candidates_per_source", 50))
             ),

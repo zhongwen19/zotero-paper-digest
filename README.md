@@ -9,6 +9,7 @@ It does not write to Zotero. You decide manually whether to import recommended p
 - Reads metadata from one or more Zotero collections: title, abstract, DOI, year, venue, authors, tags, and URL.
 - Discovers candidate papers from OpenAlex first and Crossref as a lightweight optional source.
 - Prefers recent papers in a configurable window, for example the last 90 days.
+- When very recent papers are scarce, widens the search to configurable backfill windows such as the last 2 to 3 years before falling back to classics.
 - Falls back to classic papers when not enough high-quality recent papers are found.
 - Deduplicates by DOI, normalized title, and external IDs.
 - Scores candidates locally before any LLM call.
@@ -80,6 +81,7 @@ zotero:
 
 discovery:
   recent_days: 90
+  recent_backfill_years: [2, 3]
   max_candidates_per_source: 50
   sources: [openalex, crossref]
 
@@ -119,7 +121,9 @@ Environment variables override these fields where appropriate. For example, GitH
 
 ## Recommendation Logic
 
-The system is designed for precision over recall. It may send only a few papers on quiet days.
+The system is designed for precision over recall. It may send only a few papers on quiet days, but it now tries nearby backfill windows before giving up on new-paper slots.
+
+In the default setup, the digest tries to fill 7 new-paper slots from the last 90 days first. If that pool is too small, it widens the search to the last 2 years and then the last 3 years. Only after those backfill windows are exhausted does it rely more heavily on classic papers.
 
 Local ranking considers:
 

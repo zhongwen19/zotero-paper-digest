@@ -9,7 +9,7 @@ from src.config import AppConfig
 from src.dedup import deduplicate_candidates, paper_identity_keys
 from src.discovery.crossref import CrossrefClient
 from src.discovery.openalex import OpenAlexClient
-from src.history import filter_previously_recommended
+from src.history import filter_previously_recommended, filter_to_previously_recommended
 from src.models import Digest, Paper
 from src.ranking.llm_reranker import rerank_with_deepseek
 from src.ranking.local_ranker import (
@@ -18,7 +18,6 @@ from src.ranking.local_ranker import (
     is_classic_in_window,
     is_recent,
     score_candidates,
-    select_shortlist,
 )
 from src.zotero_client import ZoteroClient
 
@@ -34,52 +33,43 @@ def build_digest(config: AppConfig, zotero_api_key: str, recommendation_history:
         raise RuntimeError("No seed papers found. Check Zotero collection keys and API permissions.")
 
     recent_candidates: list[Paper] = []
-    recent_deduped: list[Paper] = []
-    recent_shortlist: list[Paper] = []
     recent_windows_used: list[int] = []
-    local_new_count = 0
     for recent_days in build_recent_candidate_windows(config):
         recent_windows_used.append(recent_days)
         recent_candidates.extend(discover_candidates(config, seeds, classics=False, recent_days=recent_days))
-        recent_deduped = deduplicate_candidates(recent_candidates, seeds)
-        recent_deduped = filter_previously_recommended(recent_deduped, recommendation_history)
-        recent_deduped = filter_by_required_domain(recent_deduped, config.ranking.required_domain_terms)
-        recent_shortlist = select_shortlist(
-            recent_deduped,
-            seeds,
-            config.ranking.shortlist_size,
-            config.discovery.recent_days,
-        )
-        local_new_count = sum(
-            1
-            for paper in recent_shortlist
-            if is_within_new_backfill_window(paper, config) and paper.score >= QUALITY_THRESHOLD
-        )
-        if local_new_count >= config.ranking.target_new_results:
-            break
+    recent_deduped_all = deduplicate_candidates(recent_candidates, seeds)
+    recent_deduped_all = filter_by_required_domain(recent_deduped_all, config.ranking.required_domain_terms)
+    recent_deduped_fresh = filter_previously_recommended(recent_deduped_all, recommendation_history)
+    recent_repeat_candidates = filter_to_previously_recommended(recent_deduped_all, recommendation_history)
+    recent_ranked_fresh = score_candidates(recent_deduped_fresh, seeds, config.discovery.recent_days)
+    recent_ranked_repeat = score_candidates(recent_repeat_candidates, seeds, config.discovery.recent_days)
 
     classic_candidates: list[Paper] = []
-    classic_deduped: list[Paper] = []
-    classic_shortlist: list[Paper] = []
-    fallback_triggered = (
-        local_new_count < config.ranking.min_new_results_before_classics
-        or config.ranking.target_classic_results > 0
-    )
-    if fallback_triggered:
-        classic_candidates = discover_candidates(config, seeds, classics=True)
-        classic_deduped = deduplicate_candidates(classic_candidates, seeds + recent_shortlist)
-        classic_deduped = filter_previously_recommended(classic_deduped, recommendation_history)
-        classic_deduped = filter_by_required_domain(classic_deduped, config.ranking.required_domain_terms)
-        ranked_classics = score_candidates(classic_deduped, seeds, config.discovery.recent_days)
-        classic_shortlist = [
-            paper
-            for paper in ranked_classics
-            if is_classic_in_window(paper, config.classics.min_age_years, config.classics.max_age_years)
-            and paper.score >= QUALITY_THRESHOLD
-        ][: config.ranking.target_classic_results]
+    classic_windows_used = build_classic_candidate_windows(config)
+    for min_age, max_age in classic_windows_used:
+        classic_candidates.extend(
+            discover_candidates(
+                config,
+                seeds,
+                classics=True,
+                classic_min_age_years=min_age,
+                classic_max_age_years=max_age,
+            )
+        )
+    classic_deduped_all = deduplicate_candidates(classic_candidates, seeds + recent_deduped_all)
+    classic_deduped_all = filter_by_required_domain(classic_deduped_all, config.ranking.required_domain_terms)
+    classic_deduped_fresh = filter_previously_recommended(classic_deduped_all, recommendation_history)
+    classic_repeat_candidates = filter_to_previously_recommended(classic_deduped_all, recommendation_history)
+    classic_ranked_fresh = score_candidates(classic_deduped_fresh, seeds, config.discovery.recent_days)
+    classic_ranked_repeat = score_candidates(classic_repeat_candidates, seeds, config.discovery.recent_days)
 
-    recent_slots = min(config.ranking.target_new_results, max(0, config.ranking.shortlist_size - len(classic_shortlist)))
-    combined = (recent_shortlist[:recent_slots] + classic_shortlist)[: config.ranking.shortlist_size]
+    combined = build_rerank_batch(
+        recent_ranked_fresh,
+        classic_ranked_fresh,
+        recent_ranked_repeat,
+        classic_ranked_repeat,
+        config,
+    )
     seed_summary = summarize_seeds(seeds)
     reranked, llm_stats = rerank_with_deepseek(
         combined,
@@ -89,41 +79,7 @@ def build_digest(config: AppConfig, zotero_api_key: str, recommendation_history:
         required_domain_terms=config.ranking.required_domain_terms,
     )
 
-    recent_shortlist_keys = build_identity_key_index(recent_shortlist)
-    classic_shortlist_keys = build_identity_key_index(classic_shortlist)
-    new_papers = select_ranked_papers(
-        reranked,
-        eligible_identity_keys=recent_shortlist_keys,
-        predicate=lambda paper: is_within_new_backfill_window(paper, config) and paper.score >= QUALITY_THRESHOLD,
-        limit=config.ranking.target_new_results,
-        category="NEW",
-    )
-    classic_papers = select_ranked_papers(
-        reranked,
-        eligible_identity_keys=classic_shortlist_keys,
-        predicate=lambda paper: is_classic_in_window(
-            paper,
-            config.classics.min_age_years,
-            config.classics.max_age_years,
-        )
-        and paper.score >= QUALITY_THRESHOLD,
-        limit=config.ranking.target_classic_results,
-        category="CLASSIC",
-    )
-
-    if len(new_papers) < config.ranking.min_new_results_before_classics:
-        needed = min(
-            config.ranking.min_new_results_before_classics - len(new_papers),
-            max(0, config.ranking.target_classic_results - len(classic_papers)),
-        )
-        existing_titles = {paper.title for paper in new_papers + classic_papers}
-        extra_classics = [
-            paper
-            for paper in classic_shortlist
-            if paper.title not in existing_titles
-            and is_classic_in_window(paper, config.classics.min_age_years, config.classics.max_age_years)
-        ][:needed]
-        classic_papers.extend(extra_classics)
+    new_papers, classic_papers = finalize_digest_papers(reranked, config)
 
     enrich_selected_papers(new_papers + classic_papers, mailto=config.email.to_email or config.email.from_email)
     ensure_paper_summaries(new_papers + classic_papers)
@@ -131,15 +87,21 @@ def build_digest(config: AppConfig, zotero_api_key: str, recommendation_history:
     stats: dict[str, Any] = {
         "seed_count": len(seeds),
         "recent_candidate_count": len(recent_candidates),
-        "recent_deduped_count": len(recent_deduped),
+        "recent_deduped_count": len(recent_deduped_all),
+        "recent_fresh_count": len(recent_deduped_fresh),
+        "recent_repeat_count": len(recent_repeat_candidates),
         "recent_windows_used": recent_windows_used,
         "recent_backfill_triggered": len(recent_windows_used) > 1,
         "classic_candidate_count": len(classic_candidates),
-        "classic_deduped_count": len(classic_deduped),
+        "classic_deduped_count": len(classic_deduped_all),
+        "classic_fresh_count": len(classic_deduped_fresh),
+        "classic_repeat_count": len(classic_repeat_candidates),
+        "classic_windows_used": classic_windows_used,
+        "classic_backfill_triggered": len(classic_windows_used) > 1,
         "shortlist_count": len(combined),
-        "fallback_classics_triggered": fallback_triggered,
         "new_result_count": len(new_papers),
         "classic_result_count": len(classic_papers),
+        "total_result_count": len(new_papers) + len(classic_papers),
     }
     stats.update(llm_stats)
     LOGGER.info("Digest stats: %s", stats)
@@ -152,17 +114,30 @@ def discover_candidates(
     *,
     classics: bool,
     recent_days: int | None = None,
+    classic_min_age_years: int | None = None,
+    classic_max_age_years: int | None = None,
 ) -> list[Paper]:
     candidates: list[Paper] = []
     max_per_source = config.discovery.max_candidates_per_source
     sources = {source.lower() for source in config.discovery.sources}
     mailto = config.email.to_email or config.email.from_email
     effective_recent_days = recent_days if recent_days is not None else config.discovery.recent_days
+    effective_classic_min_age_years = (
+        classic_min_age_years if classic_min_age_years is not None else config.classics.min_age_years
+    )
+    effective_classic_max_age_years = (
+        classic_max_age_years if classic_max_age_years is not None else config.classics.max_age_years
+    )
 
     if "openalex" in sources:
         client = OpenAlexClient(mailto=mailto)
         discovered = (
-            client.discover_classics(seeds, config.classics.min_age_years, config.classics.max_age_years, max_per_source)
+            client.discover_classics(
+                seeds,
+                effective_classic_min_age_years,
+                effective_classic_max_age_years,
+                max_per_source,
+            )
             if classics
             else client.discover_recent(seeds, effective_recent_days, max_per_source)
         )
@@ -172,7 +147,12 @@ def discover_candidates(
     if "crossref" in sources:
         client = CrossrefClient(mailto=mailto)
         discovered = (
-            client.discover_classics(seeds, config.classics.min_age_years, config.classics.max_age_years, max_per_source)
+            client.discover_classics(
+                seeds,
+                effective_classic_min_age_years,
+                effective_classic_max_age_years,
+                max_per_source,
+            )
             if classics
             else client.discover_recent(seeds, effective_recent_days, max_per_source)
         )
@@ -191,6 +171,15 @@ def build_recent_candidate_windows(config: AppConfig) -> list[int]:
     return windows
 
 
+def build_classic_candidate_windows(config: AppConfig) -> list[tuple[int, int]]:
+    windows = [(config.classics.min_age_years, config.classics.max_age_years)]
+    for max_age_years in sorted({year for year in config.classics.backfill_max_age_years if year > 0}):
+        candidate_window = (config.classics.min_age_years, max_age_years)
+        if candidate_window not in windows:
+            windows.append(candidate_window)
+    return windows
+
+
 def is_within_new_backfill_window(paper: Paper, config: AppConfig) -> bool:
     if is_recent(paper, config.discovery.recent_days):
         return True
@@ -201,6 +190,18 @@ def is_within_new_backfill_window(paper: Paper, config: AppConfig) -> bool:
         return False
     newest_allowed_year = max(positive_backfill_years)
     return paper.year >= datetime_year() - newest_allowed_year
+
+
+def is_within_classic_backfill_window(paper: Paper, config: AppConfig) -> bool:
+    if not paper.year:
+        return False
+    positive_backfill_years = [year for year in config.classics.backfill_max_age_years if year > 0]
+    max_age_years = max([config.classics.max_age_years] + positive_backfill_years)
+    return is_classic_in_window(paper, config.classics.min_age_years, max_age_years)
+
+
+def is_classic_candidate(paper: Paper, config: AppConfig) -> bool:
+    return is_within_classic_backfill_window(paper, config) and not is_within_new_backfill_window(paper, config)
 
 
 def datetime_year() -> int:
@@ -216,27 +217,223 @@ def build_identity_key_index(papers: list[Paper]) -> set[str]:
     return keys
 
 
+def build_rerank_batch(
+    recent_ranked_fresh: list[Paper],
+    classic_ranked_fresh: list[Paper],
+    recent_ranked_repeat: list[Paper],
+    classic_ranked_repeat: list[Paper],
+    config: AppConfig,
+) -> list[Paper]:
+    combined: list[Paper] = []
+    seen_keys: set[str] = set()
+    stage_order = [
+        (
+            recent_ranked_fresh,
+            lambda paper: is_within_new_backfill_window(paper, config) and paper.score >= QUALITY_THRESHOLD,
+            config.ranking.target_new_results,
+        ),
+        (
+            classic_ranked_fresh,
+            lambda paper: is_classic_candidate(paper, config) and paper.score >= QUALITY_THRESHOLD,
+            config.ranking.target_classic_results,
+        ),
+        (
+            recent_ranked_repeat,
+            lambda paper: is_within_new_backfill_window(paper, config) and paper.score >= QUALITY_THRESHOLD,
+            config.ranking.target_new_results,
+        ),
+        (
+            classic_ranked_repeat,
+            lambda paper: is_classic_candidate(paper, config) and paper.score >= QUALITY_THRESHOLD,
+            config.ranking.target_classic_results,
+        ),
+        (
+            recent_ranked_fresh + classic_ranked_fresh,
+            lambda paper: (is_within_new_backfill_window(paper, config) or is_classic_candidate(paper, config))
+            and paper.score >= QUALITY_THRESHOLD,
+            config.ranking.shortlist_size,
+        ),
+        (
+            recent_ranked_repeat + classic_ranked_repeat,
+            lambda paper: (is_within_new_backfill_window(paper, config) or is_classic_candidate(paper, config))
+            and paper.score >= QUALITY_THRESHOLD,
+            config.ranking.shortlist_size,
+        ),
+        (
+            recent_ranked_fresh + classic_ranked_fresh + recent_ranked_repeat + classic_ranked_repeat,
+            lambda paper: is_within_new_backfill_window(paper, config) or is_classic_candidate(paper, config),
+            config.ranking.shortlist_size,
+        ),
+    ]
+    for pool, predicate, target_count in stage_order:
+        append_ranked_papers(
+            combined,
+            pool,
+            seen_keys=seen_keys,
+            predicate=predicate,
+            limit=target_count if target_count > 0 else config.ranking.shortlist_size,
+            hard_cap=config.ranking.shortlist_size,
+        )
+        if len(combined) >= config.ranking.shortlist_size:
+            break
+    return combined[: config.ranking.shortlist_size]
+
+
+def finalize_digest_papers(reranked: list[Paper], config: AppConfig) -> tuple[list[Paper], list[Paper]]:
+    new_papers = select_ranked_papers(
+        reranked,
+        predicate=lambda paper: is_within_new_backfill_window(paper, config) and paper.score >= QUALITY_THRESHOLD,
+        limit=config.ranking.target_new_results,
+        category="NEW",
+    )
+    classic_papers = select_ranked_papers(
+        reranked,
+        predicate=lambda paper: is_classic_candidate(paper, config) and paper.score >= QUALITY_THRESHOLD,
+        limit=config.ranking.target_classic_results,
+        category="CLASSIC",
+        existing_papers=new_papers,
+    )
+    if len(new_papers) < config.ranking.target_new_results:
+        append_selected_papers(
+            new_papers,
+            reranked,
+            predicate=lambda paper: is_within_new_backfill_window(paper, config),
+            limit=config.ranking.target_new_results,
+            category="NEW",
+            existing_papers=new_papers + classic_papers,
+        )
+    if len(classic_papers) < config.ranking.target_classic_results:
+        append_selected_papers(
+            classic_papers,
+            reranked,
+            predicate=lambda paper: is_classic_candidate(paper, config),
+            limit=config.ranking.target_classic_results,
+            category="CLASSIC",
+            existing_papers=new_papers + classic_papers,
+        )
+    total_target = config.ranking.target_new_results + config.ranking.target_classic_results
+    if len(new_papers) + len(classic_papers) < total_target:
+        append_selected_papers_until_total(
+            new_papers,
+            reranked,
+            predicate=lambda paper: is_within_new_backfill_window(paper, config),
+            total_target=total_target,
+            category="NEW",
+            selected_papers=new_papers + classic_papers,
+        )
+    if len(new_papers) + len(classic_papers) < total_target:
+        append_selected_papers_until_total(
+            classic_papers,
+            reranked,
+            predicate=lambda paper: is_classic_candidate(paper, config),
+            total_target=total_target,
+            category="CLASSIC",
+            selected_papers=new_papers + classic_papers,
+        )
+    return new_papers, classic_papers
+
+
 def select_ranked_papers(
     papers: list[Paper],
     *,
-    eligible_identity_keys: set[str],
     predicate: Callable[[Paper], bool],
     limit: int,
     category: str,
+    existing_papers: list[Paper] | None = None,
 ) -> list[Paper]:
     selected: list[Paper] = []
+    seen_keys = build_identity_key_index(existing_papers or [])
     for paper in papers:
-        if not eligible_identity_keys:
-            break
-        if not paper_identity_keys(paper).intersection(eligible_identity_keys):
+        paper_keys = paper_identity_keys(paper)
+        if paper_keys.intersection(seen_keys):
             continue
         if not predicate(paper):
             continue
         paper.category = category
         selected.append(paper)
+        seen_keys.update(paper_keys)
         if len(selected) >= limit:
             break
     return selected
+
+
+def append_ranked_papers(
+    target: list[Paper],
+    pool: list[Paper],
+    *,
+    seen_keys: set[str],
+    predicate: Callable[[Paper], bool],
+    limit: int,
+    hard_cap: int,
+) -> None:
+    start_count = len(target)
+    for paper in pool:
+        if len(target) >= hard_cap or len(target) - start_count >= limit:
+            return
+        paper_keys = paper_identity_keys(paper)
+        if paper_keys.intersection(seen_keys):
+            continue
+        if not predicate(paper):
+            continue
+        target.append(paper)
+        seen_keys.update(paper_keys)
+
+
+def append_selected_papers(
+    target: list[Paper],
+    pool: list[Paper],
+    *,
+    predicate: Callable[[Paper], bool],
+    limit: int,
+    category: str,
+    existing_papers: list[Paper],
+) -> None:
+    seen_keys = build_identity_key_index(existing_papers)
+    while len(target) < limit:
+        appended = False
+        for paper in pool:
+            paper_keys = paper_identity_keys(paper)
+            if paper_keys.intersection(seen_keys):
+                continue
+            if not predicate(paper):
+                continue
+            paper.category = category
+            target.append(paper)
+            seen_keys.update(paper_keys)
+            appended = True
+            if len(target) >= limit:
+                return
+        if not appended:
+            return
+
+
+def append_selected_papers_until_total(
+    target: list[Paper],
+    pool: list[Paper],
+    *,
+    predicate: Callable[[Paper], bool],
+    total_target: int,
+    category: str,
+    selected_papers: list[Paper],
+) -> None:
+    seen_keys = build_identity_key_index(selected_papers)
+    while len(selected_papers) < total_target:
+        appended = False
+        for paper in pool:
+            paper_keys = paper_identity_keys(paper)
+            if paper_keys.intersection(seen_keys):
+                continue
+            if not predicate(paper):
+                continue
+            paper.category = category
+            target.append(paper)
+            selected_papers.append(paper)
+            seen_keys.update(paper_keys)
+            appended = True
+            if len(selected_papers) >= total_target:
+                return
+        if not appended:
+            return
 
 
 def summarize_seeds(seeds: list[Paper]) -> str:

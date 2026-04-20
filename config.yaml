@@ -30,6 +30,7 @@ ranking:
 classics:
   min_age_years: 2
   max_age_years: 8
+  backfill_max_age_years: [12, 20]
 
 email:
   from_email: ""

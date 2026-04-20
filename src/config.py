@@ -40,6 +40,7 @@ class RankingConfig:
 class ClassicsConfig:
     min_age_years: int
     max_age_years: int
+    backfill_max_age_years: list[int]
 
 
 @dataclass
@@ -142,6 +143,8 @@ def load_config(path: str | Path) -> AppConfig:
         classics=ClassicsConfig(
             min_age_years=int(os.getenv("CLASSIC_MIN_AGE_YEARS", classics.get("min_age_years", 2))),
             max_age_years=int(os.getenv("CLASSIC_MAX_AGE_YEARS", classics.get("max_age_years", 8))),
+            backfill_max_age_years=_split_env_int_list(os.getenv("CLASSIC_BACKFILL_MAX_AGE_YEARS"))
+            or [int(value) for value in classics.get("backfill_max_age_years", [12, 20])],
         ),
         email=EmailConfig(
             from_email=os.getenv("EMAIL_FROM", email.get("from_email", "")),
